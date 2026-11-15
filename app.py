@@ -253,4 +253,4 @@ elif page == "Find Blood":
 elif page == "Blood Bank Locator":
 
     st.title("📍 Blood Bank Locator")
-    st.caption("Find registered blood banks by
+    st.caption("Find registered blood banks by city and blood group")
