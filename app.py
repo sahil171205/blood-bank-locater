@@ -1,9 +1,4 @@
 
-
-import streamlit as st
-import pandas as pd
-import re
-from supabase import create_client
 # ---------------- FIND BLOOD ----------------
 elif page == "Find Blood":
 
@@ -12,8 +7,15 @@ elif page == "Find Blood":
 
     donors = get_data("donors")
 
-    group = st.selectbox("Select Blood Group", BLOOD_GROUPS)
-    city = st.text_input("Enter City", placeholder="Example: Kagal")
+    group = st.selectbox(
+        "Select Blood Group",
+        BLOOD_GROUPS
+    )
+
+    city = st.text_input(
+        "Enter City",
+        placeholder="Example: Kagal"
+    )
 
     if st.button("SEARCH DONORS", use_container_width=True):
 
@@ -26,14 +28,18 @@ elif page == "Find Blood":
         else:
             result = donors.copy()
 
-            # Clean and compare Blood Group
             result["blood_group"] = (
-                result["blood_group"].astype(str).str.strip().str.upper()
+                result["blood_group"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
             )
 
-            # Clean and compare City
             result["city"] = (
-                result["city"].astype(str).str.strip().str.lower()
+                result["city"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
             )
 
             result = result[
@@ -43,19 +49,37 @@ elif page == "Find Blood":
 
             if not result.empty:
 
-                st.success(f"❤️ {len(result)} Donor(s) Found!")
+                st.success(
+                    f"❤️ {len(result)} Donor(s) Found!"
+                )
 
                 for _, donor in result.iterrows():
 
                     with st.container(border=True):
 
-                        st.subheader("👤 " + str(donor["name"]))
+                        st.subheader(
+                            "👤 " + str(donor["name"])
+                        )
 
-                        st.write("🩸 Blood Group:", donor["blood_group"])
-                        st.write("📍 City:", donor["city"].title())
+                        st.write(
+                            "🩸 Blood Group:",
+                            donor["blood_group"]
+                        )
+
+                        st.write(
+                            "📍 City:",
+                            donor["city"].title()
+                        )
+
                         st.write("🎂 Age:", donor["age"])
-                        st.write("📞 Contact:", donor["phone"])
+
+                        st.write(
+                            "📞 Contact:",
+                            donor["phone"]
+                        )
 
             else:
                 st.error("No matching donors found.")
-                st.info("Try checking the blood group and city.")
+                st.info(
+                    "Check Blood Group and City."
+                )
