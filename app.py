@@ -4,9 +4,8 @@ import pandas as pd
 import re
 import numpy as np
 from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
 from supabase import create_client
-from geopy.geocoders import Nominatim
-from geopy.exc import GeopyError
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
@@ -46,18 +45,6 @@ try:
 except Exception:
     st.error("Database connection failed. Check Streamlit Secrets.")
     st.stop()
-
-
-# ---------------- CITY / AREA GEOCODING ----------------
-@st.cache_data(ttl=86400, show_spinner=False)
-def geocode_location(place):
-    """Convert an area/city name to approximate coordinates; None if unavailable."""
-    try:
-        geocoder = Nominatim(user_agent="blood_bank_locator_college_project_v2", timeout=8)
-        result = geocoder.geocode(f"{place}, India", exactly_one=True, country_codes="in")
-        return (float(result.latitude), float(result.longitude)) if result else None
-    except (GeopyError, ValueError, OSError):
-        return None
 
 
 # ---------------- DATABASE FUNCTIONS ----------------
@@ -209,131 +196,82 @@ if page == "Home":
 
 # ---------------- FIND BLOOD ----------------
 elif page == "Find Blood":
+    st.title("🔍 Find Nearby Blood Donors")
+    st.caption("Search compatible red blood cell donors. KNN ranks donors with saved coordinates by distance.")
 
-    st.title("🔍 Find Blood Donors")
-    st.caption(
-        "Search compatible red blood cell donors "
-        "by patient blood group and city"
-    )
-
-    group = st.selectbox(
-        "Select Patient Blood Group",
-        BLOOD_GROUPS
-    )
-
-    city = st.text_input(
-        "Enter City",
-        placeholder="Example: Kagal"
-    )
+    group = st.selectbox("Select Patient Blood Group", BLOOD_GROUPS)
+    city = st.text_input("Your City", placeholder="Example: Kagal")
+    st.caption("Optional: Enter your approximate location for distance-based KNN search.")
+    c1, c2 = st.columns(2)
+    with c1:
+        user_lat = st.number_input("Your Latitude (optional)", min_value=-90.0, max_value=90.0, value=0.0, format="%.6f")
+    with c2:
+        user_lon = st.number_input("Your Longitude (optional)", min_value=-180.0, max_value=180.0, value=0.0, format="%.6f")
 
     if st.button("SEARCH DONORS", use_container_width=True):
-
         if not city.strip():
             st.warning("Please enter your city.")
-
         else:
-            try:
-                response = (
-                    supabase.table("donors")
-                    .select("*")
-                    .execute()
-                )
+            donors = get_data("donors")
+            if donors.empty:
+                st.warning("No donors registered yet.")
+            elif not {"blood_group", "city"}.issubset(donors.columns):
+                st.error("Required donor database columns are missing.")
+            else:
+                donors["blood_group_clean"] = donors["blood_group"].fillna("").astype(str).str.strip().str.upper()
+                donors["city_clean"] = donors["city"].fillna("").astype(str).str.strip().str.casefold()
+                compatible = [g for g, recipients in BLOOD_COMPATIBILITY.items() if group in recipients]
+                result = donors[donors["blood_group_clean"].isin(compatible)].copy()
+                result["same_city"] = result["city_clean"].eq(city.strip().casefold())
+                st.info("Compatible donor groups (RBC): " + ", ".join(compatible))
 
-                donors = pd.DataFrame(response.data or [])
-
-                if donors.empty:
-                    st.warning("No donors registered yet.")
-
+                if result.empty:
+                    st.warning("No compatible registered donors found.")
                 else:
-                    donors["blood_group_clean"] = (
-                        donors["blood_group"]
-                        .astype(str)
-                        .str.strip()
-                        .str.upper()
-                    )
-
-                    donors["city_clean"] = (
-                        donors["city"]
-                        .astype(str)
-                        .str.strip()
-                        .str.casefold()
-                    )
-
-                    compatible_groups = [
-                        donor_group
-                        for donor_group, recipients
-                        in BLOOD_COMPATIBILITY.items()
-                        if group.upper() in recipients
-                    ]
-
-                    result = donors[
-                        (
-                            donors["blood_group_clean"]
-                            .isin(compatible_groups)
-                        )
-                        &
-                        (
-                            donors["city_clean"]
-                            == city.strip().casefold()
-                        )
-                    ]
-
-                    st.info(
-                        "Compatible donor groups: "
-                        + ", ".join(compatible_groups)
-                    )
-
-                    if not result.empty:
-
-                        st.success(
-                            f"❤️ {len(result)} Donor(s) Found!"
-                        )
-
-                        for _, donor in result.iterrows():
-
-                            with st.container(border=True):
-
-                                st.subheader(
-                                    "👤 " + str(donor["name"])
-                                )
-
-                                col1, col2 = st.columns(2)
-
-                                with col1:
-                                    st.write(
-                                        "🩸 Blood Group:",
-                                        donor["blood_group"]
-                                    )
-                                    st.write(
-                                        "📍 City:",
-                                        donor["city"]
-                                    )
-
-                                with col2:
-                                    st.write(
-                                        "🎂 Age:",
-                                        donor["age"]
-                                    )
-                                    st.write(
-                                        "📞 Contact:",
-                                        donor["phone"]
-                                    )
-
+                    result["distance_km"] = np.nan
+                    has_user_location = user_lat != 0 and user_lon != 0
+                    if has_user_location and {"latitude", "longitude"}.issubset(result.columns):
+                        result["latitude"] = pd.to_numeric(result["latitude"], errors="coerce")
+                        result["longitude"] = pd.to_numeric(result["longitude"], errors="coerce")
+                        valid = (result["latitude"].between(-90, 90) & result["longitude"].between(-180, 180) &
+                                 result["latitude"].ne(0) & result["longitude"].ne(0))
+                        nearby = result.loc[valid].copy()
+                        if not nearby.empty:
+                            coords = np.radians(nearby[["latitude", "longitude"]].to_numpy(dtype=float))
+                            knn = NearestNeighbors(n_neighbors=len(nearby), metric="haversine", algorithm="ball_tree")
+                            knn.fit(coords)
+                            distances, indices = knn.kneighbors(np.radians([[user_lat, user_lon]]))
+                            ranked = nearby.iloc[indices[0]].copy()
+                            ranked["distance_km"] = distances[0] * 6371.0088
+                            result.loc[ranked.index, "distance_km"] = ranked["distance_km"]
+                        result = result.sort_values(["distance_km", "same_city"], ascending=[True, False], na_position="last")
                     else:
-                        st.error("No matching donors found.")
-                        st.info(
-                            "No registered compatible donors "
-                            "found in this city."
-                        )
+                        result = result.sort_values("same_city", ascending=False)
+                        st.info("Enter your location coordinates to rank donors by KNN distance. Otherwise same-city donors appear first.")
 
-            except Exception as e:
-                st.error(f"Donor search failed: {e}")
-
-    st.caption(
-        "Compatibility applies to red blood cells only. "
-        "Hospital crossmatching is required."
-    )
-
+                    st.success(f"{len(result)} compatible registered donor(s) found")
+                    for _, donor in result.iterrows():
+                        with st.container(border=True):
+                            st.subheader("👤 " + str(donor.get("name") or "Donor"))
+                            st.write("🩸 Blood Group:", donor.get("blood_group", "Unknown"))
+                            st.write("📍 City:", donor.get("city", "Not provided"))
+                            distance = donor.get("distance_km")
+                            if pd.notna(distance):
+                                st.write("📏 Approx. straight-line distance:", f"{distance:.2f} km")
+                            else:
+                                st.caption("Distance unavailable: donor location coordinates not recorded.")
+                            # Only show personal contact/address when donor opted in explicitly.
+                            consent = str(donor.get("share_details", "")).strip().lower() in ("true", "1", "yes")
+                            if consent:
+                                st.write("🏠 Address:", donor.get("address") or "Not provided")
+                                st.write("📞 Contact:", donor.get("phone") or "Not provided")
+                            else:
+                                st.caption("Donor address and phone are private (sharing consent not recorded).")
+                            if consent and pd.notna(donor.get("latitude")) and pd.notna(donor.get("longitude")):
+                                lat, lon = float(donor["latitude"]), float(donor["longitude"])
+                                if -90 <= lat <= 90 and -180 <= lon <= 180 and lat != 0 and lon != 0:
+                                    st.link_button("📍 View approximate location in Maps", f"https://www.google.com/maps/search/?api=1&query={lat},{lon}")
+                    st.warning("Donor availability is unverified. Contact a licensed blood bank/hospital for screening and crossmatching.")
 
 # ---------------- BLOOD BANK LOCATOR ----------------
 elif page == "Blood Bank Locator":
@@ -426,9 +364,12 @@ elif page == "Donor Registration":
         )
 
         city = st.text_input("City")
+        address = st.text_input("Donor Address / Area (optional)")
+        share_details = st.checkbox("I consent to display my address and phone to people searching for blood donors.")
 
-        area = st.text_input("Area / Locality (optional)", placeholder="Example: Main Road, Kagal")
-        st.caption("We use an approximate area/city location for admin-only ML clustering. No GPS access is requested.")
+        st.caption("Optional: Enter approximate donor coordinates for ML clustering. Share only with consent.")
+        latitude = st.number_input("Donor Latitude", min_value=-90.0, max_value=90.0, value=0.0, format="%.6f")
+        longitude = st.number_input("Donor Longitude", min_value=-180.0, max_value=180.0, value=0.0, format="%.6f")
 
         agree = st.checkbox(
             "I agree to be contacted about blood donation."
@@ -452,20 +393,17 @@ elif page == "Donor Registration":
 
         else:
 
-            location_text = ", ".join(x for x in [area.strip(), city.strip()] if x)
-            with st.spinner("Finding approximate location..."):
-                coords = geocode_location(location_text)
             data = {
                 "name": name.strip(),
                 "age": int(age),
                 "phone": phone.strip(),
                 "blood_group": group,
                 "city": city.strip(),
-                "latitude": coords[0] if coords else None,
-                "longitude": coords[1] if coords else None
+                "address": address.strip() or None,
+                "share_details": bool(share_details),
+                "latitude": latitude if latitude != 0 else None,
+                "longitude": longitude if longitude != 0 else None
             }
-            if coords is None:
-                st.warning("Location could not be found automatically. Donor can still register, but may not appear in the ML map.")
 
             if insert_data("donors", data):
                 st.success("Donor Registered Successfully! ❤️")
@@ -895,22 +833,11 @@ elif page == "Admin Dashboard":
 
             donors_ml = get_data("donors")
             if donors_ml.empty or not {"latitude", "longitude"}.issubset(donors_ml.columns):
-                st.info("No donor location data found. Register donors with a city/area first.")
+                st.info("No donor location data found. Register donors with latitude and longitude first.")
             else:
                 locations = donors_ml.copy()
                 locations["latitude"] = pd.to_numeric(locations["latitude"], errors="coerce")
                 locations["longitude"] = pd.to_numeric(locations["longitude"], errors="coerce")
-                # Older donors may have a city but no stored coordinates.
-                missing = locations["latitude"].isna() | locations["longitude"].isna()
-                if missing.any() and "city" in locations.columns:
-                    for city_name in locations.loc[missing, "city"].dropna().astype(str).unique():
-                        if not city_name.strip():
-                            continue
-                        found = geocode_location(city_name.strip())
-                        if found:
-                            mask = missing & (locations["city"].astype(str) == city_name)
-                            locations.loc[mask, "latitude"] = found[0]
-                            locations.loc[mask, "longitude"] = found[1]
                 locations = locations.dropna(subset=["latitude", "longitude"])
                 locations = locations[
                     locations["latitude"].between(-90, 90)
@@ -946,11 +873,11 @@ elif page == "Admin Dashboard":
                         hide_index=True
                     )
                     st.subheader("Donor Cluster Map")
-                    st.map(locations.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon", "cluster"]], color="cluster")
+                    st.map(locations.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon"]])
                     st.subheader("Donors per Cluster")
                     counts = locations.groupby("cluster").size().rename("donors")
                     st.bar_chart(counts)
-                    st.caption("Approximate city/area coordinates only; donors in the same city may share a map point. Clustering does not replace medical screening or hospital crossmatching.")
+                    st.caption("Demo ML feature. Coordinates are approximate and clustering does not replace medical screening or hospital crossmatching.")
 
     elif password:
         st.error("Incorrect Admin Password.")
