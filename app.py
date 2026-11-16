@@ -5,6 +5,8 @@ import re
 import numpy as np
 from sklearn.cluster import KMeans
 from supabase import create_client
+from geopy.geocoders import Nominatim
+from geopy.exc import GeopyError
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
@@ -44,6 +46,18 @@ try:
 except Exception:
     st.error("Database connection failed. Check Streamlit Secrets.")
     st.stop()
+
+
+# ---------------- CITY / AREA GEOCODING ----------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_location(place):
+    """Convert an area/city name to approximate coordinates; None if unavailable."""
+    try:
+        geocoder = Nominatim(user_agent="blood_bank_locator_college_project_v2", timeout=8)
+        result = geocoder.geocode(f"{place}, India", exactly_one=True, country_codes="in")
+        return (float(result.latitude), float(result.longitude)) if result else None
+    except (GeopyError, ValueError, OSError):
+        return None
 
 
 # ---------------- DATABASE FUNCTIONS ----------------
@@ -413,9 +427,8 @@ elif page == "Donor Registration":
 
         city = st.text_input("City")
 
-        st.caption("Optional: Enter approximate donor coordinates for ML clustering. Share only with consent.")
-        latitude = st.number_input("Donor Latitude", min_value=-90.0, max_value=90.0, value=0.0, format="%.6f")
-        longitude = st.number_input("Donor Longitude", min_value=-180.0, max_value=180.0, value=0.0, format="%.6f")
+        area = st.text_input("Area / Locality (optional)", placeholder="Example: Main Road, Kagal")
+        st.caption("We use an approximate area/city location for admin-only ML clustering. No GPS access is requested.")
 
         agree = st.checkbox(
             "I agree to be contacted about blood donation."
@@ -439,15 +452,20 @@ elif page == "Donor Registration":
 
         else:
 
+            location_text = ", ".join(x for x in [area.strip(), city.strip()] if x)
+            with st.spinner("Finding approximate location..."):
+                coords = geocode_location(location_text)
             data = {
                 "name": name.strip(),
                 "age": int(age),
                 "phone": phone.strip(),
                 "blood_group": group,
                 "city": city.strip(),
-                "latitude": latitude if latitude != 0 else None,
-                "longitude": longitude if longitude != 0 else None
+                "latitude": coords[0] if coords else None,
+                "longitude": coords[1] if coords else None
             }
+            if coords is None:
+                st.warning("Location could not be found automatically. Donor can still register, but may not appear in the ML map.")
 
             if insert_data("donors", data):
                 st.success("Donor Registered Successfully! ❤️")
@@ -877,11 +895,22 @@ elif page == "Admin Dashboard":
 
             donors_ml = get_data("donors")
             if donors_ml.empty or not {"latitude", "longitude"}.issubset(donors_ml.columns):
-                st.info("No donor location data found. Register donors with latitude and longitude first.")
+                st.info("No donor location data found. Register donors with a city/area first.")
             else:
                 locations = donors_ml.copy()
                 locations["latitude"] = pd.to_numeric(locations["latitude"], errors="coerce")
                 locations["longitude"] = pd.to_numeric(locations["longitude"], errors="coerce")
+                # Older donors may have a city but no stored coordinates.
+                missing = locations["latitude"].isna() | locations["longitude"].isna()
+                if missing.any() and "city" in locations.columns:
+                    for city_name in locations.loc[missing, "city"].dropna().astype(str).unique():
+                        if not city_name.strip():
+                            continue
+                        found = geocode_location(city_name.strip())
+                        if found:
+                            mask = missing & (locations["city"].astype(str) == city_name)
+                            locations.loc[mask, "latitude"] = found[0]
+                            locations.loc[mask, "longitude"] = found[1]
                 locations = locations.dropna(subset=["latitude", "longitude"])
                 locations = locations[
                     locations["latitude"].between(-90, 90)
@@ -917,11 +946,11 @@ elif page == "Admin Dashboard":
                         hide_index=True
                     )
                     st.subheader("Donor Cluster Map")
-                    st.map(locations.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon"]])
+                    st.map(locations.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon", "cluster"]], color="cluster")
                     st.subheader("Donors per Cluster")
                     counts = locations.groupby("cluster").size().rename("donors")
                     st.bar_chart(counts)
-                    st.caption("Demo ML feature. Coordinates are approximate and clustering does not replace medical screening or hospital crossmatching.")
+                    st.caption("Approximate city/area coordinates only; donors in the same city may share a map point. Clustering does not replace medical screening or hospital crossmatching.")
 
     elif password:
         st.error("Incorrect Admin Password.")
