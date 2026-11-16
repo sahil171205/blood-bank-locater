@@ -1,5 +1,7 @@
+
 streamlit
 pandas
 supabase
-scikit-learn
 numpy
+scikit-learn
+geopy
