@@ -729,6 +729,64 @@ elif page == "Admin Dashboard":
                     banks,
                     use_container_width=True
                 )
+            st.divider()
+            st.subheader("🗑️ Delete Blood Bank")
+
+            banks = get_data("banks")
+
+            if banks.empty:
+                st.info("No blood banks available.")
+
+            elif "id" not in banks.columns:
+                st.error("Blood Bank ID column is missing.")
+
+            else:
+                bank_options = {
+                    f"{row['name']} | {row['city']} | ID: {row['id']}": row["id"]
+                    for _, row in banks.iterrows()
+                }
+
+                selected_bank = st.selectbox(
+                    "Select Blood Bank to Delete",
+                    list(bank_options.keys()),
+                    key="delete_bank_select"
+                )
+
+                confirm_delete = st.checkbox(
+                    "I confirm permanent deletion of this blood bank.",
+                    key="confirm_bank_delete"
+                )
+
+                if st.button(
+                    "DELETE BLOOD BANK",
+                    disabled=not confirm_delete,
+                    key="delete_bank_button"
+                ):
+                    try:
+                        bank_id = bank_options[selected_bank]
+
+                        # Delete associated stock first
+                        supabase.table("stock").delete().eq(
+                            "bank_id", bank_id
+                        ).execute()
+
+                        # Delete selected blood bank
+                        result = (
+                            supabase.table("banks")
+                            .delete()
+                            .eq("id", bank_id)
+                            .execute()
+                        )
+
+                        if result.data:
+                            st.success("Blood Bank Deleted Successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Blood Bank was not deleted.")
+
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+
 
         # ---------------- MANAGE STOCK ----------------
         with tab4:
