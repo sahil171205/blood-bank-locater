@@ -17,6 +17,18 @@ BLOOD_GROUPS = [
     "O+", "O-", "AB+", "AB-"
 ]
 
+# Red blood cell donor -> compatible recipients
+BLOOD_COMPATIBILITY = {
+    "O+": ["O+", "A+", "B+", "AB+"],
+    "O-": ["O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"],
+    "A+": ["A+", "AB+"],
+    "A-": ["A-", "A+", "AB-", "AB+"],
+    "B+": ["B+", "AB+"],
+    "B-": ["B-", "B+", "AB-", "AB+"],
+    "AB+": ["AB+"],
+    "AB-": ["AB-", "AB+"]
+}
+
 # ---------------- SUPABASE CONNECTION ----------------
 @st.cache_resource
 def get_supabase():
@@ -179,9 +191,15 @@ if page == "Home":
 elif page == "Find Blood":
 
     st.title("🔍 Find Blood Donors")
-    st.caption("Search registered donors by blood group and city")
+    st.caption(
+        "Search compatible red blood cell donors "
+        "by patient blood group and city"
+    )
 
-    group = st.selectbox("Select Blood Group", BLOOD_GROUPS)
+    group = st.selectbox(
+        "Select Patient Blood Group",
+        BLOOD_GROUPS
+    )
 
     city = st.text_input(
         "Enter City",
@@ -195,15 +213,18 @@ elif page == "Find Blood":
 
         else:
             try:
-                # Directly fetch registered donors
-                response = supabase.table("donors").select("*").execute()
+                response = (
+                    supabase.table("donors")
+                    .select("*")
+                    .execute()
+                )
+
                 donors = pd.DataFrame(response.data or [])
 
                 if donors.empty:
                     st.warning("No donors registered yet.")
 
                 else:
-                    # Normalize values for matching
                     donors["blood_group_clean"] = (
                         donors["blood_group"]
                         .astype(str)
@@ -218,10 +239,30 @@ elif page == "Find Blood":
                         .str.casefold()
                     )
 
-                    result = donors[
-                        (donors["blood_group_clean"] == group.upper()) &
-                        (donors["city_clean"] == city.strip().casefold())
+                    # Find compatible donor blood groups
+                    compatible_groups = [
+                        donor_group
+                        for donor_group, recipients
+                        in BLOOD_COMPATIBILITY.items()
+                        if group.upper() in recipients
                     ]
+
+                    result = donors[
+                        (
+                            donors["blood_group_clean"]
+                            .isin(compatible_groups)
+                        )
+                        &
+                        (
+                            donors["city_clean"]
+                            == city.strip().casefold()
+                        )
+                    ]
+
+                    st.info(
+                        "Compatible donor groups: "
+                        + ", ".join(compatible_groups)
+                    )
 
                     if not result.empty:
 
@@ -262,11 +303,17 @@ elif page == "Find Blood":
                     else:
                         st.error("No matching donors found.")
                         st.info(
-                            "Check the blood group and city, then try again."
+                            "No registered compatible donors "
+                            "found in this city."
                         )
 
             except Exception as e:
                 st.error(f"Donor search failed: {e}")
+
+    st.caption(
+        "Compatibility applies to red blood cells only. "
+        "Hospital crossmatching is required."
+    )
 
 
 # ---------------- BLOOD BANK LOCATOR ----------------
@@ -469,7 +516,9 @@ elif page == "Admin Dashboard":
     admin_password = st.secrets.get("ADMIN_PASSWORD", "")
 
     if not admin_password:
-        st.error("ADMIN_PASSWORD is missing in Streamlit Secrets.")
+        st.error(
+            "ADMIN_PASSWORD is missing in Streamlit Secrets."
+        )
         st.stop()
 
     password = st.text_input(
@@ -580,7 +629,9 @@ elif page == "Admin Dashboard":
                     format="%.6f"
                 )
 
-                add_bank = st.form_submit_button("ADD BLOOD BANK")
+                add_bank = st.form_submit_button(
+                    "ADD BLOOD BANK"
+                )
 
             if add_bank:
 
@@ -655,7 +706,9 @@ elif page == "Admin Dashboard":
                         value=0
                     )
 
-                    save_stock = st.form_submit_button("SAVE STOCK")
+                    save_stock = st.form_submit_button(
+                        "SAVE STOCK"
+                    )
 
                 if save_stock:
 
