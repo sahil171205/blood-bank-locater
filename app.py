@@ -6,6 +6,9 @@ import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from supabase import create_client
+import requests
+import pydeck as pdk
+from urllib.parse import quote
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
@@ -64,6 +67,29 @@ def insert_data(table, data):
     except Exception as e:
         st.error(f"Database error: {e}")
         return False
+
+
+# Resolve an area/city into approximate coordinates without asking users for numbers.
+@st.cache_data(ttl=86400, show_spinner=False)
+def lookup_area(area, city):
+    query = ", ".join(x for x in [area.strip(), city.strip(), "Maharashtra", "India"] if x)
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "json", "limit": 1},
+            headers={"User-Agent": "BloodBankLocatorCollegeProject/1.0"},
+            timeout=7,
+        )
+        response.raise_for_status()
+        found = response.json()
+        if found:
+            return float(found[0]["lat"]), float(found[0]["lon"])
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        pass
+    # If a small locality is not indexed, try the city center as an approximate fallback.
+    if area.strip() and city.strip():
+        return lookup_area("", city)
+    return None
 
 
 # ---------------- CUSTOM CSS ----------------
@@ -201,12 +227,9 @@ elif page == "Find Blood":
 
     group = st.selectbox("Select Patient Blood Group", BLOOD_GROUPS)
     city = st.text_input("Your City", placeholder="Example: Kagal")
-    st.caption("Optional: Enter your approximate location for distance-based KNN search.")
-    c1, c2 = st.columns(2)
-    with c1:
-        user_lat = st.number_input("Your Latitude (optional)", min_value=-90.0, max_value=90.0, value=0.0, format="%.6f")
-    with c2:
-        user_lon = st.number_input("Your Longitude (optional)", min_value=-180.0, max_value=180.0, value=0.0, format="%.6f")
+    user_area = st.text_input("Your Area Name (optional)", placeholder="Example: Shahunagar")
+    st.caption("Area and city are used to estimate nearby donors; no coordinates needed.")
+    user_location = lookup_area(user_area, city) if city.strip() else None
 
     if st.button("SEARCH DONORS", use_container_width=True):
         if not city.strip():
@@ -229,10 +252,21 @@ elif page == "Find Blood":
                     st.warning("No compatible registered donors found.")
                 else:
                     result["distance_km"] = np.nan
-                    has_user_location = user_lat != 0 and user_lon != 0
-                    if has_user_location and {"latitude", "longitude"}.issubset(result.columns):
+                    has_user_location = user_location is not None
+                    if has_user_location:
+                        for col in ("latitude", "longitude"):
+                            if col not in result.columns:
+                                result[col] = np.nan
                         result["latitude"] = pd.to_numeric(result["latitude"], errors="coerce")
                         result["longitude"] = pd.to_numeric(result["longitude"], errors="coerce")
+                        # Existing donors without saved coordinates can be searched by area.
+                        # Limit online lookups to avoid overloading the public geocoder.
+                        missing = (result["latitude"].isna() | result["longitude"].isna() |
+                                   result["latitude"].eq(0) | result["longitude"].eq(0))
+                        for idx, donor_row in result.loc[missing].iterrows():
+                            location = lookup_area(str(donor_row.get("address") or ""), str(donor_row.get("city") or ""))
+                            if location:
+                                result.at[idx, "latitude"], result.at[idx, "longitude"] = location
                         valid = (result["latitude"].between(-90, 90) & result["longitude"].between(-180, 180) &
                                  result["latitude"].ne(0) & result["longitude"].ne(0))
                         nearby = result.loc[valid].copy()
@@ -240,16 +274,65 @@ elif page == "Find Blood":
                             coords = np.radians(nearby[["latitude", "longitude"]].to_numpy(dtype=float))
                             knn = NearestNeighbors(n_neighbors=len(nearby), metric="haversine", algorithm="ball_tree")
                             knn.fit(coords)
-                            distances, indices = knn.kneighbors(np.radians([[user_lat, user_lon]]))
+                            distances, indices = knn.kneighbors(np.radians([list(user_location)]))
                             ranked = nearby.iloc[indices[0]].copy()
                             ranked["distance_km"] = distances[0] * 6371.0088
                             result.loc[ranked.index, "distance_km"] = ranked["distance_km"]
                         result = result.sort_values(["distance_km", "same_city"], ascending=[True, False], na_position="last")
                     else:
                         result = result.sort_values("same_city", ascending=False)
-                        st.info("Enter your location coordinates to rank donors by KNN distance. Otherwise same-city donors appear first.")
+                        st.info("Location could not be estimated. Showing donors from the same city first.")
 
                     st.success(f"{len(result)} compatible registered donor(s) found")
+
+                    # Nearest compatible donors on an interactive map.
+                    # Area/city centroids are approximate, never exact donor home positions.
+                    map_rows = []
+                    for _, d in result.iterrows():
+                        lat = pd.to_numeric(d.get("latitude"), errors="coerce")
+                        lon = pd.to_numeric(d.get("longitude"), errors="coerce")
+                        if pd.notna(lat) and pd.notna(lon) and -90 <= lat <= 90 and -180 <= lon <= 180 and lat != 0 and lon != 0:
+                            consent = str(d.get("share_details", "")).strip().lower() in ("true", "1", "yes")
+                            # Only map donors who opted in to sharing their location.
+                            if consent:
+                                dist = d.get("distance_km")
+                                map_rows.append({
+                                    "lat": float(lat), "lon": float(lon),
+                                    "name": str(d.get("name") or "Donor"),
+                                    "blood_group": str(d.get("blood_group") or ""),
+                                    "area": str(d.get("address") or "Not provided"),
+                                    "city": str(d.get("city") or ""),
+                                    "distance": f"{dist:.1f} km" if pd.notna(dist) else "Not available",
+                                })
+                    st.subheader("🗺️ Nearest Compatible Donors Map")
+                    if map_rows:
+                        points = pd.DataFrame(map_rows)
+                        layers = [pdk.Layer(
+                            "ScatterplotLayer", points,
+                            get_position="[lon, lat]", get_radius=350,
+                            get_fill_color=[230, 35, 65, 210], pickable=True,
+                        )]
+                        if user_location:
+                            layers.append(pdk.Layer(
+                                "ScatterplotLayer",
+                                pd.DataFrame([{"lat": user_location[0], "lon": user_location[1]}]),
+                                get_position="[lon, lat]", get_radius=450,
+                                get_fill_color=[30, 135, 255, 220], pickable=False,
+                            ))
+                        st.pydeck_chart(pdk.Deck(
+                            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+                            initial_view_state=pdk.ViewState(
+                                latitude=user_location[0] if user_location else float(points["lat"].mean()),
+                                longitude=user_location[1] if user_location else float(points["lon"].mean()),
+                                zoom=9, pitch=0,
+                            ),
+                            layers=layers,
+                            tooltip={"html": "<b>{name}</b><br/>Blood: {blood_group}<br/>Area: {area}<br/>City: {city}<br/>Distance: {distance}"},
+                        ))
+                        st.caption("🔴 Donor area (approximate)  •  🔵 Your search area. Distances are straight-line estimates.")
+                    else:
+                        st.info("No consenting donors have a usable mapped location yet. Donors are listed below.")
+
                     for _, donor in result.iterrows():
                         with st.container(border=True):
                             st.subheader("👤 " + str(donor.get("name") or "Donor"))
@@ -263,10 +346,11 @@ elif page == "Find Blood":
                             # Only show personal contact/address when donor opted in explicitly.
                             consent = str(donor.get("share_details", "")).strip().lower() in ("true", "1", "yes")
                             if consent:
-                                st.write("🏠 Address:", donor.get("address") or "Not provided")
+                                st.write("🏘️ Donor Area Name:", donor.get("address") or "Not provided")
                                 st.write("📞 Contact:", donor.get("phone") or "Not provided")
                             else:
-                                st.caption("Donor address and phone are private (sharing consent not recorded).")
+                                st.write("🏘️ Donor Area Name: Hidden (donor consent required)")
+                                st.caption("Phone and address are private until the donor agrees to share them.")
                             if consent and pd.notna(donor.get("latitude")) and pd.notna(donor.get("longitude")):
                                 lat, lon = float(donor["latitude"]), float(donor["longitude"])
                                 if -90 <= lat <= 90 and -180 <= lon <= 180 and lat != 0 and lon != 0:
@@ -364,12 +448,8 @@ elif page == "Donor Registration":
         )
 
         city = st.text_input("City")
-        address = st.text_input("Donor Address / Area (optional)")
-        share_details = st.checkbox("I consent to display my address and phone to people searching for blood donors.")
-
-        st.caption("Optional: Enter approximate donor coordinates for ML clustering. Share only with consent.")
-        latitude = st.number_input("Donor Latitude", min_value=-90.0, max_value=90.0, value=0.0, format="%.6f")
-        longitude = st.number_input("Donor Longitude", min_value=-180.0, max_value=180.0, value=0.0, format="%.6f")
+        address = st.text_input("Donor Area Name", placeholder="Example: Shahunagar, Kagal")
+        share_details = st.checkbox("I consent to show my area, approximate map location, and phone to blood seekers.")
 
         agree = st.checkbox(
             "I agree to be contacted about blood donation."
@@ -385,6 +465,9 @@ elif page == "Donor Registration":
         if not name.strip() or not city.strip():
             st.error("Please enter your name and city.")
 
+        elif not address.strip():
+            st.error("Please enter your area name or address.")
+
         elif not re.fullmatch(r"[6-9][0-9]{9}", phone.strip()):
             st.error("Enter a valid 10-digit Indian mobile number.")
 
@@ -393,6 +476,7 @@ elif page == "Donor Registration":
 
         else:
 
+            location = lookup_area(address, city)
             data = {
                 "name": name.strip(),
                 "age": int(age),
@@ -401,12 +485,14 @@ elif page == "Donor Registration":
                 "city": city.strip(),
                 "address": address.strip() or None,
                 "share_details": bool(share_details),
-                "latitude": latitude if latitude != 0 else None,
-                "longitude": longitude if longitude != 0 else None
+                "latitude": location[0] if location else None,
+                "longitude": location[1] if location else None
             }
 
             if insert_data("donors", data):
                 st.success("Donor Registered Successfully! ❤️")
+                if not location:
+                    st.info("Area location could not be estimated. The donor is still registered and can be found by city.")
                 st.balloons()
 
 
@@ -453,6 +539,9 @@ elif page == "Blood Request":
 
         if not patient.strip() or not city.strip() or not hospital.strip():
             st.error("Please complete all required fields.")
+
+        elif not address.strip():
+            st.error("Please enter your area name or address.")
 
         elif not re.fullmatch(r"[6-9][0-9]{9}", phone.strip()):
             st.error("Enter a valid 10-digit Indian mobile number.")
@@ -833,7 +922,7 @@ elif page == "Admin Dashboard":
 
             donors_ml = get_data("donors")
             if donors_ml.empty or not {"latitude", "longitude"}.issubset(donors_ml.columns):
-                st.info("No donor location data found. Register donors with latitude and longitude first.")
+                st.info("No donor location data found. Register donors with a valid area name and city first.")
             else:
                 locations = donors_ml.copy()
                 locations["latitude"] = pd.to_numeric(locations["latitude"], errors="coerce")
