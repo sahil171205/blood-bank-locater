@@ -1,10 +1,10 @@
 
 import streamlit as st
-import sqlite3
 import pandas as pd
 import re
+from supabase import create_client
 
-# ---------- PAGE CONFIG ----------
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="Blood Bank Locator",
     page_icon="🩸",
@@ -12,363 +12,330 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-DB = "blood_bank.db"
-
 BLOOD_GROUPS = [
     "A+", "A-", "B+", "B-",
     "O+", "O-", "AB+", "AB-"
 ]
 
-# Donor -> Compatible recipients (Red Blood Cells)
-BLOOD_COMPATIBILITY = {
-    "O+": ["O+", "A+", "B+", "AB+"],
-    "O-": BLOOD_GROUPS,
-    "A+": ["A+", "AB+"],
-    "A-": ["A-", "A+", "AB-", "AB+"],
-    "B+": ["B+", "AB+"],
-    "B-": ["B-", "B+", "AB-", "AB+"],
-    "AB+": ["AB+"],
-    "AB-": ["AB-", "AB+"]
-}
+# ---------------- SUPABASE CONNECTION ----------------
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+    return create_client(url, key)
 
-# ---------- DATABASE ----------
-def connect_db():
-    return sqlite3.connect(
-        DB,
-        check_same_thread=False
-    )
+try:
+    supabase = get_supabase()
+except Exception as e:
+    st.error("Database connection failed. Check Streamlit Secrets.")
+    st.stop()
 
 
-def init_db():
-    with connect_db() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS donors (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                age INTEGER NOT NULL,
-                blood_group TEXT NOT NULL,
-                city TEXT NOT NULL,
-                phone TEXT NOT NULL
-            )
-        """)
-
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS banks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                city TEXT NOT NULL,
-                address TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL
-            )
-        """)
-
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS stock (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bank_id INTEGER NOT NULL,
-                blood_group TEXT NOT NULL,
-                units INTEGER NOT NULL,
-                FOREIGN KEY(bank_id) REFERENCES banks(id)
-            )
-        """)
-
-
+# ---------------- DATABASE FUNCTIONS ----------------
 def get_data(table):
-    allowed = ["donors", "banks", "stock"]
-
-    if table not in allowed:
+    try:
+        result = supabase.table(table).select("*").execute()
+        return pd.DataFrame(result.data or [])
+    except Exception as e:
+        st.error(f"Unable to load {table}: {e}")
         return pd.DataFrame()
 
-    with connect_db() as con:
-        return pd.read_sql_query(
-            f"SELECT * FROM {table}", con
-        )
+
+def insert_data(table, data):
+    try:
+        supabase.table(table).insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Database error: {e}")
+        return False
 
 
-def add_donor(name, age, group, city, phone):
-    with connect_db() as con:
-        con.execute("""
-            INSERT INTO donors
-            (name, age, blood_group, city, phone)
-            VALUES (?, ?, ?, ?, ?)
-        """, (name, age, group, city, phone))
-
-
-def add_bank(name, city, address, phone, lat, lon):
-    with connect_db() as con:
-        con.execute("""
-            INSERT INTO banks
-            (name, city, address, phone, latitude, longitude)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, city, address, phone, lat, lon))
-
-
-def save_stock(bank_id, group, units):
-    with connect_db() as con:
-        existing = con.execute("""
-            SELECT id FROM stock
-            WHERE bank_id = ? AND blood_group = ?
-        """, (bank_id, group)).fetchone()
-
-        if existing:
-            con.execute("""
-                UPDATE stock
-                SET units = ?
-                WHERE id = ?
-            """, (units, existing[0]))
-        else:
-            con.execute("""
-                INSERT INTO stock
-                (bank_id, blood_group, units)
-                VALUES (?, ?, ?)
-            """, (bank_id, group, units))
-
-
-def valid_phone(phone):
-    return bool(re.fullmatch(r"[6-9]\d{9}", phone))
-
-
-def compatible_donors(recipient_group):
-    return [
-        donor for donor, recipients
-        in BLOOD_COMPATIBILITY.items()
-        if recipient_group in recipients
-    ]
-
-
-init_db()
-
-# ---------- CUSTOM CSS ----------
+# ---------------- CUSTOM CSS ----------------
 st.markdown("""
 <style>
 .stApp {
-    background: #080b12;
-    color: white;
+    background: #08090d;
+    color: #f5f5f5;
 }
-
-h1, h2, h3 {
-    color: #ff354b !important;
-}
-
-p, label {
-    color: #f2f2f2;
-}
-
 [data-testid="stSidebar"] {
-    background: #141923;
+    background: #111218;
+    border-right: 1px solid #55202e;
 }
-
-.stButton > button {
-    background: linear-gradient(
-        90deg, #a50020, #ff304f
-    );
+h1, h2, h3 {
+    color: #ff334f !important;
+}
+p, label, span {
+    color: #eeeeee;
+}
+div.stButton > button {
+    background: linear-gradient(90deg,#b90028,#ff1744);
     color: white;
     border: none;
-    border-radius: 10px;
-    padding: 10px 20px;
+    border-radius: 9px;
     font-weight: bold;
+    min-height: 42px;
 }
-
-.stButton > button:hover {
-    background: #ff5369;
+div.stButton > button:hover {
+    background: #ff3659;
     color: white;
 }
-
-[data-testid="stMetric"] {
-    background: #181d29;
-    padding: 20px;
+div[data-testid="stMetric"] {
+    background: #171820;
+    border: 1px solid #49202d;
+    padding: 18px;
     border-radius: 12px;
-    border: 1px solid #ab2338;
 }
-
 div[data-testid="stForm"] {
-    border: 1px solid #742539;
+    background: #12131a;
+    border: 1px solid #49202d;
+    padding: 18px;
     border-radius: 12px;
-    padding: 20px;
 }
-
-[data-testid="stDataFrame"] {
-    border-radius: 12px;
+input, textarea {
+    background: #20212a !important;
+    color: white !important;
+}
+.blood-hero {
+    background: linear-gradient(120deg,#220711,#111218,#330817);
+    padding: 30px;
+    border: 1px solid #8c1635;
+    border-radius: 18px;
+    margin-bottom: 22px;
+}
+.blood-hero h1 {
+    font-size: 36px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- SIDEBAR ----------
-st.sidebar.title("🩸 BLOOD BANK LOCATOR")
-st.sidebar.caption("Find Blood. Save Lives.")
+
+# ---------------- SIDEBAR ----------------
+st.sidebar.markdown("# 🩸 BLOOD CARE")
+st.sidebar.caption("BLOOD BANK LOCATOR SYSTEM")
 
 page = st.sidebar.radio(
-    "Navigation",
+    "NAVIGATION",
     [
-        "Dashboard",
+        "Home",
         "Find Blood",
-        "Register Donor",
-        "Blood Banks",
-        "Register Blood Bank",
-        "Blood Stock",
-        "Blood Compatibility",
-        "About"
+        "Blood Bank Locator",
+        "Donor Registration",
+        "Blood Request",
+        "Admin Dashboard"
     ]
 )
 
-st.sidebar.divider()
-st.sidebar.info(
-    "A college project developed using "
-    "Python, Streamlit and SQLite."
-)
+st.sidebar.markdown("---")
+st.sidebar.caption("SAVE BLOOD • SAVE LIVES")
 
-# ---------- DASHBOARD ----------
-if page == "Dashboard":
 
-    st.title("🩸 Blood Bank Locator")
-    st.subheader("Every Drop Counts. Every Life Matters.")
+# ---------------- HOME ----------------
+if page == "Home":
 
     donors = get_data("donors")
+    requests = get_data("blood_requests")
     banks = get_data("banks")
     stock = get_data("stock")
 
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric("Registered Donors", len(donors))
-    c2.metric("Blood Banks", len(banks))
-    c3.metric(
-        "Blood Units",
-        int(stock["units"].sum())
-        if not stock.empty else 0
+    total_units = (
+        int(pd.to_numeric(stock["units"], errors="coerce").fillna(0).sum())
+        if not stock.empty and "units" in stock.columns else 0
     )
 
-    st.divider()
+    st.markdown("""
+    <div class="blood-hero">
+        <h1>🩸 BLOOD BANK LOCATOR</h1>
+        <p>Connecting Blood Donors, Blood Banks and People in Need.</p>
+        <p>Every Drop Counts. Every Life Matters.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.subheader("Welcome to Blood Bank Locator")
+    c1, c2, c3, c4 = st.columns(4)
 
-    st.write("""
-    Blood Bank Locator is a web-based application
-    designed to help users search for registered
-    blood donors and blood banks.
+    c1.metric("Blood Banks", len(banks))
+    c2.metric("Registered Donors", len(donors))
+    c3.metric("Blood Units Listed", total_units)
+    c4.metric("Blood Requests", len(requests))
 
-    The system provides blood group compatibility
-    information and available blood stock records.
-    """)
+    st.markdown("## ❤️ Welcome to Blood Care")
+
+    a, b = st.columns(2)
+
+    with a:
+        st.info("🔍 Find blood donors by city and blood group.")
+        st.info("📍 View registered blood bank locations.")
+
+    with b:
+        st.info("👤 Register as a blood donor.")
+        st.info("🚨 Submit an emergency blood request.")
 
     st.warning(
-        "This is a demonstration project. "
-        "Blood availability and donor eligibility "
-        "must be confirmed with a hospital."
+        "Demonstration project. Stock availability is not "
+        "real-time verified. Always contact the blood bank."
     )
 
-# ---------- FIND BLOOD ----------
+
+# ---------------- FIND BLOOD ----------------
 elif page == "Find Blood":
 
     st.title("🔍 Find Blood Donors")
-    st.caption(
-        "Search donors using recipient blood group and city"
-    )
+    st.caption("Search registered donors by blood group and city")
 
-    donors = get_data("donors")
-
-    recipient_group = st.selectbox(
-        "Select Patient Blood Group",
-        BLOOD_GROUPS
-    )
+    group = st.selectbox("Select Blood Group", BLOOD_GROUPS)
 
     city = st.text_input(
         "Enter City",
         placeholder="Example: Kagal"
     )
 
-    include_compatible = st.checkbox(
-        "Include Compatible Blood Groups",
-        value=True
-    )
-
-    if st.button(
-        "SEARCH DONORS",
-        use_container_width=True
-    ):
+    if st.button("SEARCH DONORS", use_container_width=True):
 
         if not city.strip():
             st.warning("Please enter your city.")
 
-        elif donors.empty:
-            st.warning("No donors registered yet.")
-
         else:
-            result = donors.copy()
+            try:
+                # Directly fetch registered donors
+                response = supabase.table("donors").select("*").execute()
+                donors = pd.DataFrame(response.data or [])
 
-            result["blood_group"] = (
-                result["blood_group"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
+                if donors.empty:
+                    st.warning("No donors registered yet.")
+
+                else:
+                    # Normalize values for matching
+                    donors["blood_group_clean"] = (
+                        donors["blood_group"]
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
+                    )
+
+                    donors["city_clean"] = (
+                        donors["city"]
+                        .astype(str)
+                        .str.strip()
+                        .str.casefold()
+                    )
+
+                    result = donors[
+                        (donors["blood_group_clean"] == group.upper()) &
+                        (donors["city_clean"] == city.strip().casefold())
+                    ]
+
+                    if not result.empty:
+
+                        st.success(
+                            f"❤️ {len(result)} Donor(s) Found!"
+                        )
+
+                        for _, donor in result.iterrows():
+
+                            with st.container(border=True):
+
+                                st.subheader(
+                                    "👤 " + str(donor["name"])
+                                )
+
+                                col1, col2 = st.columns(2)
+
+                                with col1:
+                                    st.write(
+                                        "🩸 Blood Group:",
+                                        donor["blood_group"]
+                                    )
+                                    st.write(
+                                        "📍 City:",
+                                        donor["city"]
+                                    )
+
+                                with col2:
+                                    st.write(
+                                        "🎂 Age:",
+                                        donor["age"]
+                                    )
+                                    st.write(
+                                        "📞 Contact:",
+                                        donor["phone"]
+                                    )
+
+                    else:
+                        st.error("No matching donors found.")
+                        st.info(
+                            "Check the blood group and city, then try again."
+                        )
+
+            except Exception as e:
+                st.error(f"Donor search failed: {e}")
+
+
+# ---------------- BLOOD BANK LOCATOR ----------------
+elif page == "Blood Bank Locator":
+
+    st.title("📍 Blood Bank Locator")
+    st.caption("Find registered blood bank locations")
+
+    banks = get_data("banks")
+
+    if banks.empty:
+        st.info("No blood banks registered yet.")
+
+    else:
+        for _, bank in banks.iterrows():
+
+            with st.container(border=True):
+
+                st.subheader("🏥 " + str(bank["name"]))
+                st.write("📍", bank["address"])
+                st.write("City:", bank["city"])
+                st.write("Phone:", bank["phone"])
+
+                latitude = bank.get("latitude", 0)
+                longitude = bank.get("longitude", 0)
+
+                if pd.notna(latitude) and pd.notna(longitude):
+                    if float(latitude) != 0 and float(longitude) != 0:
+                        st.link_button(
+                            "Open in Google Maps",
+                            f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
+                        )
+
+        map_data = banks.copy()
+
+        map_data["latitude"] = pd.to_numeric(
+            map_data["latitude"], errors="coerce"
+        )
+        map_data["longitude"] = pd.to_numeric(
+            map_data["longitude"], errors="coerce"
+        )
+
+        map_data = map_data.dropna(
+            subset=["latitude", "longitude"]
+        )
+
+        map_data = map_data[
+            (map_data["latitude"] != 0) &
+            (map_data["longitude"] != 0)
+        ]
+
+        if not map_data.empty:
+            st.subheader("Blood Bank Map")
+
+            st.map(
+                map_data.rename(
+                    columns={
+                        "latitude": "lat",
+                        "longitude": "lon"
+                    }
+                )
             )
 
-            result["city"] = (
-                result["city"]
-                .astype(str)
-                .str.strip()
-            )
 
-            if include_compatible:
-                groups = compatible_donors(
-                    recipient_group
-                )
-            else:
-                groups = [recipient_group]
+# ---------------- DONOR REGISTRATION ----------------
+elif page == "Donor Registration":
 
-            result = result[
-                result["blood_group"].isin(groups)
-                &
-                result["city"].str.contains(
-                    re.escape(city.strip()),
-                    case=False,
-                    na=False,
-                    regex=True
-                )
-            ]
-
-            st.info(
-                "Compatible donor groups: "
-                + ", ".join(groups)
-            )
-
-            if result.empty:
-                st.warning(
-                    "No matching registered donors found."
-                )
-            else:
-                st.success(
-                    f"{len(result)} matching donor(s) found!"
-                )
-
-                st.dataframe(
-                    result[
-                        [
-                            "name",
-                            "age",
-                            "blood_group",
-                            "city"
-                        ]
-                    ],
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                st.caption(
-                    "Donor contact details are not "
-                    "published publicly in this demo."
-                )
-
-    st.warning(
-        "Compatibility is for red blood cells only. "
-        "Hospital testing and crossmatching are required."
-    )
-
-# ---------- REGISTER DONOR ----------
-elif page == "Register Donor":
-
-    st.title("❤️ Register as Blood Donor")
+    st.title("❤️ Blood Donor Registration")
+    st.write("Register yourself as a blood donor.")
 
     with st.form("donor_form"):
 
@@ -378,7 +345,12 @@ elif page == "Register Donor":
             "Age",
             min_value=18,
             max_value=65,
-            value=21
+            value=18
+        )
+
+        phone = st.text_input(
+            "Mobile Number",
+            max_chars=10
         )
 
         group = st.selectbox(
@@ -388,340 +360,345 @@ elif page == "Register Donor":
 
         city = st.text_input("City")
 
-        phone = st.text_input("Mobile Number")
-
-        consent = st.checkbox(
-            "I agree to store my details "
-            "for this demonstration."
+        agree = st.checkbox(
+            "I agree to be contacted about blood donation."
         )
 
-        submitted = st.form_submit_button(
+        submit = st.form_submit_button(
             "REGISTER DONOR",
             use_container_width=True
         )
 
-        if submitted:
+    if submit:
 
-            if not name.strip() or not city.strip():
-                st.error("Please fill all required fields.")
+        if not name.strip() or not city.strip():
+            st.error("Please enter your name and city.")
 
-            elif not valid_phone(phone):
-                st.error(
-                    "Enter a valid 10-digit mobile number."
-                )
+        elif not re.fullmatch(r"[6-9][0-9]{9}", phone.strip()):
+            st.error("Enter a valid 10-digit Indian mobile number.")
 
-            elif not consent:
-                st.error(
-                    "Please provide consent."
-                )
-
-            else:
-                add_donor(
-                    name.strip(),
-                    age,
-                    group,
-                    city.strip(),
-                    phone
-                )
-
-                st.success(
-                    "Donor registered successfully!"
-                )
-
-# ---------- BLOOD BANKS ----------
-elif page == "Blood Banks":
-
-    st.title("🏥 Find Blood Banks")
-
-    banks = get_data("banks")
-
-    city = st.text_input(
-        "Search Blood Banks by City"
-    )
-
-    if banks.empty:
-        st.warning("No blood banks registered.")
-
-    else:
-        result = banks.copy()
-
-        if city.strip():
-            result = result[
-                result["city"].str.contains(
-                    re.escape(city.strip()),
-                    case=False,
-                    na=False
-                )
-            ]
-
-        if result.empty:
-            st.warning("No blood banks found.")
+        elif not agree:
+            st.warning("Please provide your consent.")
 
         else:
-            st.dataframe(
-                result[
-                    [
-                        "name",
-                        "city",
-                        "address",
-                        "phone"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True
-            )
 
-            st.subheader("📍 Blood Bank Locations")
+            data = {
+                "name": name.strip(),
+                "age": int(age),
+                "phone": phone.strip(),
+                "blood_group": group,
+                "city": city.strip()
+            }
 
-            map_data = result[
-                ["latitude", "longitude"]
-            ].dropna()
+            if insert_data("donors", data):
+                st.success("Donor Registered Successfully! ❤️")
+                st.balloons()
 
-            if not map_data.empty:
-                st.map(map_data)
 
-# ---------- REGISTER BLOOD BANK ----------
-elif page == "Register Blood Bank":
+# ---------------- BLOOD REQUEST ----------------
+elif page == "Blood Request":
 
-    st.title("🏥 Register Blood Bank")
+    st.title("🚨 Emergency Blood Request")
+    st.write("Submit a request for required blood.")
 
-    st.info(
-        "Demo registration only. "
-        "Production systems require verified "
-        "blood bank administrators."
-    )
+    with st.form("request_form"):
 
-    with st.form("bank_form"):
+        patient = st.text_input("Patient Name")
 
-        name = st.text_input("Blood Bank Name")
+        phone = st.text_input(
+            "Contact Number",
+            max_chars=10
+        )
+
+        group = st.selectbox(
+            "Required Blood Group",
+            BLOOD_GROUPS
+        )
+
         city = st.text_input("City")
-        address = st.text_area("Full Address")
-        phone = st.text_input("Contact Number")
+        hospital = st.text_input("Hospital Name")
 
-        lat = st.number_input(
-            "Latitude",
-            min_value=-90.0,
-            max_value=90.0,
-            value=16.7,
-            format="%.6f"
+        units = st.number_input(
+            "Required Units",
+            min_value=1,
+            max_value=20,
+            value=1
         )
 
-        lon = st.number_input(
-            "Longitude",
-            min_value=-180.0,
-            max_value=180.0,
-            value=74.2,
-            format="%.6f"
+        agree = st.checkbox(
+            "I confirm that these details are correct."
         )
 
-        submitted = st.form_submit_button(
-            "ADD BLOOD BANK",
+        submit = st.form_submit_button(
+            "SUBMIT BLOOD REQUEST",
             use_container_width=True
         )
 
-        if submitted:
+    if submit:
 
-            if not all([
-                name.strip(),
-                city.strip(),
-                address.strip(),
-                phone.strip()
-            ]):
-                st.error("Fill all fields.")
+        if not patient.strip() or not city.strip() or not hospital.strip():
+            st.error("Please complete all required fields.")
+
+        elif not re.fullmatch(r"[6-9][0-9]{9}", phone.strip()):
+            st.error("Enter a valid 10-digit Indian mobile number.")
+
+        elif not agree:
+            st.warning("Please confirm the information.")
+
+        else:
+
+            data = {
+                "patient_name": patient.strip(),
+                "phone": phone.strip(),
+                "blood_group": group,
+                "city": city.strip(),
+                "hospital_name": hospital.strip(),
+                "units": int(units),
+                "status": "Pending"
+            }
+
+            if insert_data("blood_requests", data):
+                st.success("Blood Request Submitted Successfully! ❤️")
+
+
+# ---------------- ADMIN DASHBOARD ----------------
+elif page == "Admin Dashboard":
+
+    st.title("🔐 Admin Dashboard")
+
+    admin_password = st.secrets.get("ADMIN_PASSWORD", "")
+
+    if not admin_password:
+        st.error("ADMIN_PASSWORD is missing in Streamlit Secrets.")
+        st.stop()
+
+    password = st.text_input(
+        "Admin Password",
+        type="password"
+    )
+
+    if password == admin_password:
+
+        st.success("Admin Login Successful!")
+
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "Donors",
+            "Blood Requests",
+            "Blood Banks",
+            "Manage Stock"
+        ])
+
+        # DONORS
+        with tab1:
+
+            st.subheader("Registered Blood Donors")
+
+            donors = get_data("donors")
+
+            if donors.empty:
+                st.info("No donors registered.")
 
             else:
-                add_bank(
-                    name.strip(),
-                    city.strip(),
-                    address.strip(),
-                    phone.strip(),
-                    lat,
-                    lon
+                st.dataframe(
+                    donors,
+                    use_container_width=True
                 )
 
-                st.success(
-                    "Blood bank registered successfully!"
+                st.download_button(
+                    "Download Donors CSV",
+                    donors.to_csv(index=False).encode("utf-8"),
+                    "donors.csv",
+                    "text/csv"
                 )
 
-# ---------- BLOOD STOCK ----------
-elif page == "Blood Stock":
+        # BLOOD REQUESTS
+        with tab2:
 
-    st.title("🩸 Blood Stock Management")
+            st.subheader("Blood Requests")
 
-    banks = get_data("banks")
+            requests = get_data("blood_requests")
 
-    if banks.empty:
-        st.warning(
-            "Register a blood bank first."
-        )
+            if requests.empty:
+                st.info("No blood requests.")
 
-    else:
-        bank_options = {
-            f"{row['name']} - {row['city']} "
-            f"(ID: {row['id']})": int(row["id"])
-            for _, row in banks.iterrows()
-        }
+            else:
 
-        with st.form("stock_form"):
-
-            selected_bank = st.selectbox(
-                "Select Blood Bank",
-                list(bank_options.keys())
-            )
-
-            group = st.selectbox(
-                "Blood Group",
-                BLOOD_GROUPS
-            )
-
-            units = st.number_input(
-                "Available Units",
-                min_value=0,
-                step=1
-            )
-
-            submitted = st.form_submit_button(
-                "SAVE STOCK",
-                use_container_width=True
-            )
-
-            if submitted:
-                save_stock(
-                    bank_options[selected_bank],
-                    group,
-                    units
+                st.dataframe(
+                    requests,
+                    use_container_width=True
                 )
 
-                st.success(
-                    "Blood stock updated!"
+                selected_id = st.selectbox(
+                    "Select Request ID to Update Status",
+                    requests["id"].tolist()
                 )
 
-        st.divider()
-
-        stock = get_data("stock")
-
-        if not stock.empty:
-
-            merged = stock.merge(
-                banks[["id", "name", "city"]],
-                left_on="bank_id",
-                right_on="id",
-                how="left"
-            )
-
-            st.subheader("Available Blood Stock")
-
-            st.dataframe(
-                merged[
+                new_status = st.selectbox(
+                    "Request Status",
                     [
-                        "name",
-                        "city",
-                        "blood_group",
-                        "units"
+                        "Pending",
+                        "Contacted",
+                        "Completed",
+                        "Cancelled"
                     ]
-                ],
-                use_container_width=True,
-                hide_index=True
-            )
+                )
 
-# ---------- BLOOD COMPATIBILITY ----------
-elif page == "Blood Compatibility":
+                if st.button("UPDATE REQUEST STATUS"):
 
-    st.title("🧬 Blood Group Compatibility")
+                    try:
+                        supabase.table("blood_requests").update(
+                            {"status": new_status}
+                        ).eq("id", selected_id).execute()
 
-    st.caption(
-        "Red Blood Cell Donation Compatibility"
-    )
+                        st.success("Request status updated.")
+                        st.rerun()
 
-    donor_group = st.selectbox(
-        "Select Donor Blood Group",
-        BLOOD_GROUPS
-    )
+                    except Exception as e:
+                        st.error(str(e))
 
-    recipients = BLOOD_COMPATIBILITY[
-        donor_group
-    ]
+        # BLOOD BANKS
+        with tab3:
 
-    st.success(
-        f"{donor_group} can donate red blood cells to: "
-        + ", ".join(recipients)
-    )
+            st.subheader("Register Blood Bank")
 
-    st.subheader("Compatible Recipient Groups")
+            with st.form("bank_form"):
 
-    cols = st.columns(4)
+                bank_name = st.text_input("Blood Bank Name")
+                bank_city = st.text_input("City")
+                address = st.text_input("Full Address")
+                bank_phone = st.text_input("Phone Number")
 
-    for i, group in enumerate(BLOOD_GROUPS):
+                latitude = st.number_input(
+                    "Latitude",
+                    value=0.0,
+                    format="%.6f"
+                )
 
-        with cols[i % 4]:
+                longitude = st.number_input(
+                    "Longitude",
+                    value=0.0,
+                    format="%.6f"
+                )
 
-            if group in recipients:
-                st.success(f"✅ {group}")
+                add_bank = st.form_submit_button("ADD BLOOD BANK")
+
+            if add_bank:
+
+                if not all([
+                    bank_name.strip(),
+                    bank_city.strip(),
+                    address.strip(),
+                    bank_phone.strip()
+                ]):
+                    st.error("Complete all bank details.")
+
+                else:
+
+                    bank_data = {
+                        "name": bank_name.strip(),
+                        "city": bank_city.strip(),
+                        "address": address.strip(),
+                        "phone": bank_phone.strip(),
+                        "latitude": latitude,
+                        "longitude": longitude
+                    }
+
+                    if insert_data("banks", bank_data):
+                        st.success("Blood Bank Added!")
+                        st.rerun()
+
+            st.divider()
+
+            st.subheader("Registered Blood Banks")
+
+            banks = get_data("banks")
+
+            if not banks.empty:
+                st.dataframe(
+                    banks,
+                    use_container_width=True
+                )
+
+        # MANAGE STOCK
+        with tab4:
+
+            st.subheader("Manage Blood Stock")
+
+            banks = get_data("banks")
+
+            if banks.empty:
+                st.warning("First register a blood bank.")
+
             else:
-                st.error(f"❌ {group}")
 
-    st.divider()
+                bank_options = {
+                    f"{row['name']} - {row['city']}": int(row["id"])
+                    for _, row in banks.iterrows()
+                }
 
-    recipient = st.selectbox(
-        "Select Recipient Blood Group",
-        BLOOD_GROUPS,
-        key="recipient_check"
-    )
+                with st.form("stock_form"):
 
-    donor_groups = compatible_donors(recipient)
+                    selected_bank = st.selectbox(
+                        "Select Blood Bank",
+                        list(bank_options.keys())
+                    )
 
-    st.info(
-        "Compatible donor groups: "
-        + ", ".join(donor_groups)
-    )
+                    blood_group = st.selectbox(
+                        "Blood Group",
+                        BLOOD_GROUPS
+                    )
 
-    st.warning(
-        "This chart applies to red blood cells, "
-        "not plasma or platelets. A hospital must "
-        "verify compatibility before transfusion."
-    )
+                    stock_units = st.number_input(
+                        "Available Units",
+                        min_value=0,
+                        max_value=10000,
+                        value=0
+                    )
 
-# ---------- ABOUT ----------
-elif page == "About":
+                    save_stock = st.form_submit_button("SAVE STOCK")
 
-    st.title("ℹ️ About This Project")
+                if save_stock:
 
-    st.subheader("Blood Bank Locator")
+                    bank_id = bank_options[selected_bank]
 
-    st.write("""
-    Blood Bank Locator is a Python-based
-    web application developed as a college project.
+                    try:
 
-    Technologies Used:
-    - Python
-    - Streamlit
-    - SQLite
-    - Pandas
-    - HTML / CSS
+                        supabase.table("stock").upsert(
+                            {
+                                "bank_id": bank_id,
+                                "blood_group": blood_group,
+                                "units": int(stock_units)
+                            },
+                            on_conflict="bank_id,blood_group"
+                        ).execute()
 
-    Main Features:
-    - Donor Registration
-    - Blood Donor Search
-    - Blood Bank Registration
-    - Blood Bank Location Map
-    - Blood Stock Management
-    - Blood Group Compatibility
-    - Dashboard
-    """)
+                        st.success("Blood Stock Saved!")
+                        st.rerun()
 
-    st.subheader("Project Team")
+                    except Exception as e:
+                        st.error(str(e))
 
-    st.write("""
-    Ritesh K. Kumbhar - 98
+            st.divider()
 
-    Sahil P. Gosavi - 97
+            st.subheader("Current Blood Stock")
 
-    Rugved V. Patil - 102
+            stock = get_data("stock")
 
-    Omkar P. Shivgand - 95
-    """)
+            if not stock.empty:
+                st.dataframe(
+                    stock,
+                    use_container_width=True
+                )
 
-    st.caption(
-        "Department of Artificial Intelligence "
-        "and Machine Learning"
-    )
+
+    elif password:
+        st.error("Incorrect Admin Password.")
+
+
+# ---------------- FOOTER ----------------
+st.markdown("---")
+
+st.markdown(
+    "<center>🩸 BLOOD CARE | SAVE BLOOD • SAVE LIVES</center>",
+    unsafe_allow_html=True
+)
