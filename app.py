@@ -2,6 +2,8 @@
 import streamlit as st
 import pandas as pd
 import re
+import numpy as np
+from sklearn.cluster import KMeans
 from supabase import create_client
 
 # ---------------- PAGE CONFIG ----------------
@@ -411,6 +413,10 @@ elif page == "Donor Registration":
 
         city = st.text_input("City")
 
+        st.caption("Optional: Enter approximate donor coordinates for ML clustering. Share only with consent.")
+        latitude = st.number_input("Donor Latitude", min_value=-90.0, max_value=90.0, value=0.0, format="%.6f")
+        longitude = st.number_input("Donor Longitude", min_value=-180.0, max_value=180.0, value=0.0, format="%.6f")
+
         agree = st.checkbox(
             "I agree to be contacted about blood donation."
         )
@@ -438,7 +444,9 @@ elif page == "Donor Registration":
                 "age": int(age),
                 "phone": phone.strip(),
                 "blood_group": group,
-                "city": city.strip()
+                "city": city.strip(),
+                "latitude": latitude if latitude != 0 else None,
+                "longitude": longitude if longitude != 0 else None
             }
 
             if insert_data("donors", data):
@@ -534,11 +542,12 @@ elif page == "Admin Dashboard":
 
         st.success("Admin Login Successful!")
 
-        tab1, tab2, tab3, tab4 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "Donors",
             "Blood Requests",
             "Blood Banks",
-            "Manage Stock"
+            "Manage Stock",
+            "ML Donor Clusters"
         ])
 
         # ---------------- DONORS ----------------
@@ -860,6 +869,59 @@ elif page == "Admin Dashboard":
                     stock,
                     use_container_width=True
                 )
+
+        # ---------------- ML DONOR LOCATION CLUSTERING ----------------
+        with tab5:
+            st.subheader("🤖 K-Means Donor Location Clustering")
+            st.caption("Admin-only visualization. Clusters group nearby donor coordinates; they do not predict donor availability or blood compatibility.")
+
+            donors_ml = get_data("donors")
+            if donors_ml.empty or not {"latitude", "longitude"}.issubset(donors_ml.columns):
+                st.info("No donor location data found. Register donors with latitude and longitude first.")
+            else:
+                locations = donors_ml.copy()
+                locations["latitude"] = pd.to_numeric(locations["latitude"], errors="coerce")
+                locations["longitude"] = pd.to_numeric(locations["longitude"], errors="coerce")
+                locations = locations.dropna(subset=["latitude", "longitude"])
+                locations = locations[
+                    locations["latitude"].between(-90, 90)
+                    & locations["longitude"].between(-180, 180)
+                    & (locations["latitude"] != 0)
+                    & (locations["longitude"] != 0)
+                ].copy()
+
+                if len(locations) < 2:
+                    st.warning("At least 2 donors with valid coordinates are needed for clustering.")
+                else:
+                    # Convert latitude/longitude to local approximate kilometer offsets.
+                    # This makes longitude distances depend on latitude, unlike raw degrees.
+                    avg_lat_rad = np.radians(locations["latitude"].mean())
+                    coords_km = np.column_stack((
+                        locations["latitude"].to_numpy() * 111.32,
+                        locations["longitude"].to_numpy() * 111.32 * np.cos(avg_lat_rad)
+                    ))
+                    unique_count = len(np.unique(coords_km, axis=0))
+                    if unique_count < 2:
+                        st.info("All donor coordinates are identical; separate clusters cannot be formed.")
+                        locations["cluster"] = 1
+                    else:
+                        max_clusters = min(8, unique_count, len(locations))
+                        k = st.slider("Number of Clusters (K)", min_value=2, max_value=max_clusters, value=min(3, max_clusters))
+                        model = KMeans(n_clusters=k, random_state=42, n_init=10)
+                        locations["cluster"] = model.fit_predict(coords_km) + 1
+
+                    st.success(f"Grouped {len(locations)} donors into {locations['cluster'].nunique()} cluster(s).")
+                    st.dataframe(
+                        locations[[c for c in ["name", "city", "blood_group", "cluster"] if c in locations.columns]],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    st.subheader("Donor Cluster Map")
+                    st.map(locations.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon"]])
+                    st.subheader("Donors per Cluster")
+                    counts = locations.groupby("cluster").size().rename("donors")
+                    st.bar_chart(counts)
+                    st.caption("Demo ML feature. Coordinates are approximate and clustering does not replace medical screening or hospital crossmatching.")
 
     elif password:
         st.error("Incorrect Admin Password.")
